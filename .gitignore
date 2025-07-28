@@ -130,4 +130,9 @@ dist
 .pnp.*
 
 # Replit debugger
-.breakpoints
+.breakpointsnode_modules
+.env
+.wwebjs_auth
+node_modules
+.env
+.wwebjs_auth

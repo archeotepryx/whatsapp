@@ -1,71 +1,113 @@
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-} = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
-const P = require('pino');
-const dotenv = require('dotenv');
-dotenv.config();
+const { Client, LocalAuth } = require("whatsapp-web.js");
+const qrcode = require("qrcode-terminal");
+const axios = require("axios");
+const { exec } = require("child_process");
+require("dotenv").config();
 
-async function startSock() {
-  const { state, saveCreds } = await useMultiFileAuthState('./auth');
-  const { version } = await fetchLatestBaileysVersion();
+// Configure WhatsApp client
+const client = new Client({
+  authStrategy: new LocalAuth({
+    dataPath: "./.wwebjs_auth", // Persistent auth storage
+  }),
+  puppeteer: {
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+      "--disable-gpu",
+    ],
+  },
+  webVersionCache: {
+    type: "remote",
+    remotePath:
+      "https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html",
+  },
+});
 
-  const sock = makeWASocket({
-    version,
-    logger: P({ level: 'silent' }),
-    auth: state,
-    browser: ['Ubuntu', 'Chrome', '22.04'],
-  });
+// QR Code Generation
+client.on("qr", (qr) => {
+  console.log("📲 QR Code generated - Scan to login");
+  qrcode.generate(qr, { small: true });
+});
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
+// Bot Ready Event
+client.on("ready", () => {
+  console.log("✅ WhatsApp bot is ready and authenticated");
+  console.log(
+    `🚀 Bot running in ${process.env.NODE_ENV || "development"} mode`,
+  );
+});
 
-    if (qr) {
-      console.log(`🔐 QR Code (open on your phone to scan): ${qr}`);
-      // Optionally: send this QR to your WhatsApp number
-    }
+// Message Handling
+client.on("message", async (message) => {
+  // Ignore messages from status broadcasts and your own messages
+  if (message.from === "status@broadcast" || message.fromMe) return;
 
-    if (connection === 'close') {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+  const prompt = message.body.trim();
+  if (!prompt) return;
 
-      console.log(
-        '🔌 Connection closed due to',
-        lastDisconnect?.error,
-        '\nReconnecting:',
-        shouldReconnect
-      );
+  console.log(`📨 Received from ${message.from}: ${prompt}`);
 
-      if (shouldReconnect) {
-        startSock();
-      } else {
-        console.log('❌ Logged out. Please redeploy and rescan the QR.');
-      }
-    }
+  try {
+    // Get AI response
+    const reply = await getAIResponse(prompt);
 
-    if (connection === 'open') {
-      console.log('✅ Connected to WhatsApp');
-    }
-  });
+    // Send reply
+    await message.reply(reply);
+    console.log(`🤖 Replied to ${message.from}`);
+  } catch (error) {
+    console.error("❌ Error processing message:", error);
+    await message.reply(
+      "⚠️ Sorry, I encountered an error. Please try again later.",
+    );
+  }
+});
 
-  sock.ev.on('creds.update', saveCreds);
+// AI Response Function
+async function getAIResponse(prompt) {
+  try {
+    const response = await axios.post(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        model: "llama3-70b-8192",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 1000,
+        temperature: 0.7,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 30000, // 30 seconds timeout
+      },
+    );
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message || msg.key.fromMe) return;
-
-    const sender = msg.key.remoteJid;
-    const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
-
-    console.log(`📩 Message from ${sender}: ${text}`);
-
-    if (text?.toLowerCase() === 'hi') {
-      await sock.sendMessage(sender, { text: 'Hello! 👋 This is your WhatsApp bot.' });
-    }
-  });
+    return response.data.choices[0].message.content.trim();
+  } catch (error) {
+    console.error("❌ AI API Error:", error.response?.data || error.message);
+    throw new Error("Failed to get AI response");
+  }
 }
 
-startSock();
+// Handle process termination
+process.on("SIGINT", () => {
+  console.log("🛑 Shutting down gracefully...");
+  client.destroy().then(() => process.exit());
+});
+
+// Initialize client with error handling
+(async () => {
+  try {
+    await client.initialize();
+    console.log("🔄 Initializing WhatsApp client...");
+  } catch (err) {
+    console.error("❌ Failed to initialize client:", err);
+    process.exit(1);
+  }
+})();
